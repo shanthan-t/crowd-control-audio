@@ -7,36 +7,13 @@ import threading
 import time
 from ultralytics import YOLO
 import sentinel_hub  # Integration
+import sentinel_auth # Authentication
 
 # --- Configuration ---
 # YOLO_MODEL = "yolov8n.pt" # dynamic now
 CROWD_DENSITY_HIGH = 5
 AUDIO_RATE = 22050
 AUDIO_CHUNK = 1024
-
-# --- State Management ---
-if 'audio_status' not in st.session_state:
-    st.session_state.audio_status = "NORMAL"
-if 'running' not in st.session_state:
-    st.session_state.running = False
-
-# --- Audio Thread ---
-def audio_listener():
-    """
-    Background thread to listen to microphone and update session state.
-    Note: Streamlit session state is not thread-safe in the usual way, 
-    so we use a global or a mutable object if we want to share data? 
-    Actually, threads spawned by Streamlit re-run the script. 
-    It's tricky.
-    
-    Better approach for Streamlit Live Loop:
-    Run the logic INSIDE the main loop frame-by-frame.
-    Audio needs to be non-blocking.
-    
-    We will use PyAudio non-blocking callback or just read small chunks in the loop.
-    For this prototype, let's try to read audio in the loop.
-    """
-    pass 
 
 # --- Helper Logic ---
 def analyze_audio_chunk(stream):
@@ -112,82 +89,95 @@ def get_risk_level(audio_status, person_count):
     else:
         return "LOW", "green"
 
-# --- Main App ---
-def main():
-    st.set_page_config(page_title="Sentinel Integrated System", layout="wide")
+# --- Authentication UI ---
+def login_screen():
+    st.title("🔐 Sentinel Login")
     
-    # --- Sidebar Settings ---
-    st.sidebar.title("Sentinel Config")
+    tab1, tab2 = st.tabs(["Login", "Sign Up"])
     
-    # 1. View Mode
-    view_mode = st.sidebar.radio("View Mode", ["Authority Dashboard", "Public Safety View"])
+    with tab1:
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login")
+            
+            if submitted:
+                if sentinel_auth.verify_user(username, password):
+                    st.session_state.authenticated = True
+                    st.session_state.username = username
+                    st.success("Logged in successfully!")
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password")
     
-    # 2. Input Source
-    st.sidebar.divider()
-    st.sidebar.subheader("Input Source")
-    input_type = st.sidebar.selectbox("Source Type", ["Live Webcam", "RTMP Stream", "RTSP Stream", "HTTP Snapshot", "Upload File"])
-    
-    rtsp_url = ""
-    rtmp_url = ""
-    http_url = ""
-    snapshot_interval = 0.5
-    
-    if input_type == "RTMP Stream":
-        rtmp_url = st.sidebar.text_input("RTMP URL", "rtmp://192.168.1.xxx/live/stream")
-    elif input_type == "RTSP Stream":
-        rtsp_url = st.sidebar.text_input("RTSP URL", "rtsp://admin:pass@192.168.1.xxx:554/cam/realmonitor?channel=1&subtype=0")
-    elif input_type == "HTTP Snapshot":
-        http_url = st.sidebar.text_input("Snapshot URL", "http://admin:pass@192.168.1.xxx/cgi-bin/snapshot.cgi")
-        snapshot_interval = st.sidebar.slider("Poll Interval (sec)", 0.1, 2.0, 0.5)
+    with tab2:
+        with st.form("signup_form"):
+            new_user = st.text_input("New Username")
+            new_pass = st.text_input("New Password", type="password")
+            confirm_pass = st.text_input("Confirm Password", type="password")
+            submitted_signup = st.form_submit_button("Sign Up")
+            
+            if submitted_signup:
+                if new_pass != confirm_pass:
+                    st.error("Passwords do not match")
+                elif len(new_pass) < 4:
+                    st.error("Password too short")
+                else:
+                    if sentinel_auth.create_user(new_user, new_pass):
+                        st.success("Account created! Please login.")
+                    else:
+                        st.error("Username already exists")
 
-    # 3. AI Settings (Only in Authority Mode)
+# --- Main Dashboard Logic ---
+def sentinel_dashboard():
+    # --- Sidebar Settings ---
+    # Logout Button
+    with st.sidebar:
+        st.write(f"User: **{st.session_state.username}**")
+        if st.button("Logout", type="secondary"):
+            st.session_state.authenticated = False
+            st.session_state.username = None
+            st.rerun()
+        st.divider()
+
+    # 1. Input Source
+    st.sidebar.subheader("Input Source")
+    input_type = st.sidebar.selectbox("Source Type", ["Live Webcam", "Phone Camera (IP Webcam)", "Upload File"])
+    
+    ipcam_url = ""
+    
+    if input_type == "Phone Camera (IP Webcam)":
+        ipcam_url = st.sidebar.text_input("IP Webcam URL", "http://192.168.1.xxx:8080/video")
+        st.sidebar.caption("Download 'IP Webcam' app on phone. Start server. Enter correct IP.")
+
+    # 2. AI Settings (Authority Config)
+    st.sidebar.divider()
+    st.sidebar.subheader("AI Configuration")
+    model_type = st.sidebar.selectbox(
+        "YOLO Pose Model", 
+        ["Fast (Nano)", "Balanced (Small)", "High Accuracy (Large)"], 
+        index=0
+    )
+    
+    # Hardcoded "Best" Defaults
     conf_thresh = 0.25
     img_size = 640
     iou_thresh = 0.45
-    selected_model = "yolov8n-pose.pt"
     
-    # ROI Defaults
+    model_map = {
+        "Fast (Nano)": "yolov8n-pose.pt",
+        "Balanced (Small)": "yolov8s-pose.pt",
+        "High Accuracy (Large)": "yolov8l-pose.pt"
+    }
+    selected_model = model_map[model_type]
+    
+    # ROI Defaults (Disabled/Full Screen)
+    use_roi = False
     roi_top, roi_bottom, roi_left, roi_right = 0.0, 1.0, 0.0, 1.0
 
-    if view_mode == "Authority Dashboard":
-        st.sidebar.divider()
-        st.sidebar.subheader("AI Parameters")
-        model_type = st.sidebar.selectbox(
-            "YOLO Pose Model", 
-            ["Nano Pose (Fast)", "Small Pose (Balanced)", "Medium Pose (Accuracy)", "Large Pose (High Acc)", "Huge Pose (Best Acc)"], 
-            index=0
-        )
-        conf_thresh = st.sidebar.slider("Detection Confidence", 0.1, 1.0, 0.25, 0.05)
-        img_size = st.sidebar.select_slider("Inference Resolution (px)", options=[640, 960, 1280], value=640)
-        iou_thresh = st.sidebar.slider("NMS IOU Threshold", 0.1, 1.0, 0.45, 0.05)
-        
-        model_map = {
-            "Nano Pose (Fast)": "yolov8n-pose.pt",
-            "Small Pose (Balanced)": "yolov8s-pose.pt",
-            "Medium Pose (Accuracy)": "yolov8m-pose.pt",
-            "Large Pose (High Acc)": "yolov8l-pose.pt",
-            "Huge Pose (Best Acc)": "yolov8x-pose.pt"
-        }
-        selected_model = model_map[model_type]
-        
-        # 4. Geofencing / ROI
-        st.sidebar.divider()
-        st.sidebar.subheader("Geofencing (ROI)")
-        use_roi = st.sidebar.checkbox("Enable Zone Filtering")
-        if use_roi:
-            col_r1, col_r2 = st.sidebar.columns(2)
-            roi_top = col_r1.slider("Top %", 0.0, 1.0, 0.0)
-            roi_bottom = col_r1.slider("Bottom %", 0.0, 1.0, 1.0)
-            roi_left = col_r2.slider("Left %", 0.0, 1.0, 0.0)
-            roi_right = col_r2.slider("Right %", 0.0, 1.0, 1.0)
-
     # --- Header ---
-    if view_mode == "Authority Dashboard":
-        st.title("🛡️ Sentinel Authority Dashboard")
-        st.markdown("**Real-time Fusion of Computer Vision & Audio Analysis**")
-    else:
-        st.title("📢 Public Safety Alert System")
-        st.markdown("**Live Crowd Guidance & Status**")
+    st.title("🛡️ Sentinel Authority Dashboard")
+    st.markdown("**Real-time Fusion of Computer Vision & Audio Analysis**")
 
     # --- Loading Resources ---
     @st.cache_resource
@@ -198,7 +188,7 @@ def main():
     hub = sentinel_hub.get_hub()
 
     # --- Execution Logic ---
-    if input_type in ["Live Webcam", "RTMP Stream", "RTSP Stream", "HTTP Snapshot"]:
+    if input_type in ["Live Webcam", "Phone Camera (IP Webcam)"]:
         start_btn = st.button("Start System", type="primary")
         stop_btn = st.button("Stop System")
         
@@ -206,19 +196,13 @@ def main():
         if stop_btn: st.session_state.running = False
 
         if st.session_state.running:
-            # Layout Selection
-            if view_mode == "Authority Dashboard":
-                video_placeholder = st.empty()
-                c1, c2, c3, c4 = st.columns(4)
-                m_people = c1.empty()
-                m_skel = c2.empty()
-                m_audio = c3.empty()
-                m_risk = c4.empty()
-            else:
-                # Public View Layout
-                status_header = st.empty()
-                instruction_text = st.empty()
-                video_placeholder = st.empty() # Optional: Show video? Maybe smaller.
+            # Layout Selection (Authority Only)
+            video_placeholder = st.empty()
+            c1, c2, c3, c4 = st.columns(4)
+            m_people = c1.empty()
+            m_skel = c2.empty()
+            m_audio = c3.empty()
+            m_risk = c4.empty()
             
             # Init Setup
             p = pyaudio.PyAudio()
@@ -228,17 +212,12 @@ def main():
             ingest = None   # For Robust Network Stream
             
             if input_type in ["Live Webcam", "Upload File"]:
-                # Use standard blocking capture for local devices/files
-                src = 0 if input_type == "Live Webcam" else None # Handle file later if needed
+                src = 0 if input_type == "Live Webcam" else None
                 if input_type == "Live Webcam": cap = cv2.VideoCapture(0)
-                # (File upload logic is handled separately usually, but for now we keep webcam basic)
                 
-            elif input_type in ["RTSP Stream", "RTMP Stream"]:
-                # Use Robust Ingest
-                url = rtsp_url if input_type == "RTSP Stream" else rtmp_url
-                # Clean URL logic
-                if input_type == "RTSP Stream" and url.isdigit(): url = int(url)
-                ingest = VideoIngest(url)
+            elif input_type == "Phone Camera (IP Webcam)":
+                # Use Robust Ingest for network stream
+                ingest = VideoIngest(ipcam_url)
             
             panic_counter = 0
 
@@ -247,26 +226,13 @@ def main():
                 # --- Frame Capture ---
                 frame = None
                 
-                if input_type == "HTTP Snapshot":
-                    # ... Existing HTTP Logic ...
-                    try:
-                        import requests
-                        resp = requests.get(http_url, timeout=2.0)
-                        if resp.status_code == 200:
-                            arr = np.asarray(bytearray(resp.content), dtype=np.uint8)
-                            frame = cv2.imdecode(arr, -1)
-                        else: time.sleep(0.5)
-                    except: time.sleep(0.5)
-                    time.sleep(snapshot_interval)
-                    
-                elif ingest:
+                if ingest:
                     # Robust Stream
                     frame = ingest.read()
                     if frame is None:
                         # Stream connects asynchronously. Show spinner or wait.
                         # Don't break loop, just wait for connection.
                         time.sleep(0.1)
-                        # Optional: st.toast("Connecting to stream...")
                         continue 
                         
                 elif cap:
@@ -285,8 +251,8 @@ def main():
                 z_y1, z_y2 = int(h * roi_top), int(h * roi_bottom)
                 z_x1, z_x2 = int(w * roi_left), int(w * roi_right)
                 
-                # Draw ROI box on frame for Authority
-                if view_mode == "Authority Dashboard":
+                # Draw ROI box on frame for Authority (Only if enabled)
+                if use_roi:
                     cv2.rectangle(frame, (z_x1, z_y1), (z_x2, z_y2), (255, 200, 0), 2)
                 
                 # Inference
@@ -328,28 +294,14 @@ def main():
                 # --- Display ---
                 frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                 
-                if view_mode == "Authority Dashboard":
-                    video_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
-                    m_people.metric("People (In Zone)", person_count)
-                    m_skel.metric("Skeleton", skeleton_detected)
-                    m_audio.metric("Audio", final_audio, delta_color="inverse")
-                    m_risk.markdown(f"### Risk: :{color}[{risk}]")
-                else: # Public View
-                    # Big Status
-                    if risk == "LOW":
-                        status_header.markdown(f"<h1 style='text-align: center; color: green; font-size: 80px;'>✅ SAFE</h1>", unsafe_allow_html=True)
-                        instruction_text.markdown(f"<h2 style='text-align: center;'>Area is clear. Proceed normally.</h2>", unsafe_allow_html=True)
-                    elif risk == "MEDIUM":
-                        status_header.markdown(f"<h1 style='text-align: center; color: orange; font-size: 80px;'>⚠️ CAUTION</h1>", unsafe_allow_html=True)
-                        instruction_text.markdown(f"<h2 style='text-align: center;'>High density detected. Please slow down.</h2>", unsafe_allow_html=True)
-                    else: # HIGH
-                        status_header.markdown(f"<h1 style='text-align: center; color: red; font-size: 80px;'>🚨 DANGER</h1>", unsafe_allow_html=True)
-                        instruction_text.markdown(f"<h2 style='text-align: center;'>EMERGENCY DETECTED. FOLLOW EXITS CALMLY.</h2>", unsafe_allow_html=True)
-                    
-                    # Smaller video for public? Or just status?
-                    # Typically public view doesn't show raw surveillance.
-                    # But for demo, let's show it smaller or dimmed.
-                    video_placeholder.image(frame_rgb, channels="RGB", width=400)
+                # Authority Display
+                video_placeholder.image(frame_rgb, channels="RGB", width="stretch")
+                
+                m_people.metric("People Count", person_count)
+                m_skel.metric("Skeleton Data", skeleton_detected)
+                
+                m_audio.metric("Audio Audio", final_audio, delta_color="inverse")
+                m_risk.metric("Crowd Risk", risk, delta_color="inverse" if risk=="LOW" else "normal")
 
             # Cleanup
             if cap: cap.release()
@@ -406,6 +358,24 @@ def main():
                 frame_idx += 1
 
             cap.release()
+
+# --- Main/Entry Point ---
+def main():
+    st.set_page_config(page_title="Sentinel Integrated System", layout="wide")
+    
+    # Init Session State
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+    if 'username' not in st.session_state:
+        st.session_state.username = None
+    if 'running' not in st.session_state:
+        st.session_state.running = False
+        
+    # Router
+    if st.session_state.authenticated:
+        sentinel_dashboard()
+    else:
+        login_screen()
 
 if __name__ == "__main__":
     main()

@@ -7,4 +7,5 @@ opencv-python
 ultralytics
 python-socketio
 pyserial
+bcrypt
 
