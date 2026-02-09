@@ -8,4 +8,5 @@ ultralytics
 python-socketio
 pyserial
 bcrypt
+pymongo
 

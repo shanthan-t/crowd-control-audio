@@ -1,56 +1,45 @@
-import sqlite3
+import pymongo
 import bcrypt
 import os
 
-DB_NAME = "sentinel_users.db"
+# --- Configuration ---
+MONGO_URI = "mongodb://localhost:27017/"
+DB_NAME = "sentinel_auth"
+COLLECTION_NAME = "users"
 
-def init_user_db():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            username TEXT PRIMARY KEY,
-            password_hash BLOB
-        )
-    ''')
-    conn.commit()
-    conn.close()
+def get_collection():
+    client = pymongo.MongoClient(MONGO_URI)
+    db = client[DB_NAME]
+    return db[COLLECTION_NAME]
 
 def create_user(username, password):
     """Returns True if successful, False if username exists."""
-    init_user_db()
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
+    users = get_collection()
     
     # Check if user exists
-    c.execute("SELECT username FROM users WHERE username=?", (username,))
-    if c.fetchone():
-        conn.close()
+    if users.find_one({"username": username}):
         return False
     
     # Hash password
-    # salt = bcrypt.gensalt()
-    # hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
-    
-    # We need to run this command to install bcrypt first, but for the code content:
     hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
     
-    c.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, hashed))
-    conn.commit()
-    conn.close()
+    # Store only username and password
+    user_doc = {
+        "username": username,
+        "password": hashed  # Storing hash as binary
+    }
+    
+    users.insert_one(user_doc)
     return True
 
 def verify_user(username, password):
     """Returns True if credentials are valid."""
-    init_user_db()
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
+    users = get_collection()
     
-    c.execute("SELECT password_hash FROM users WHERE username=?", (username,))
-    result = c.fetchone()
-    conn.close()
+    user = users.find_one({"username": username})
     
-    if result:
-        stored_hash = result[0]
+    if user:
+        stored_hash = user['password']
         return bcrypt.checkpw(password.encode('utf-8'), stored_hash)
+    
     return False
