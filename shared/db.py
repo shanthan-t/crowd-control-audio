@@ -53,6 +53,55 @@ class Database:
             print(f"[DB] History Error: {e}")
             return []
 
+    # --- Staff Management ---
+    def add_staff(self, name, age, phone, zone):
+        """Adds a new staff member."""
+        staff_member = {
+            "name": name,
+            "age": age,
+            "phone": phone,
+            "zone": zone,
+            "added_at": datetime.datetime.now()
+        }
+        try:
+            self.db.staff.insert_one(staff_member)
+            return True
+        except Exception as e:
+            print(f"[DB] Staff Insert Error: {e}")
+            return False
+
+    def get_all_staff(self):
+        """Retrieves all staff members."""
+        try:
+            return list(self.db.staff.find())
+        except Exception as e:
+            print(f"[DB] Staff Read Error: {e}")
+            return []
+
+    def update_staff_zone(self, name, new_zone):
+        """Updates the zone for a specific staff member."""
+        try:
+            result = self.db.staff.update_one(
+                {"name": name},
+                {"$set": {"zone": new_zone}}
+            )
+            # Return True if user was found (even if zone didn't change)
+            return result.matched_count > 0
+        except Exception as e:
+            print(f"[DB] Staff Update Error: {e}")
+            return False
+
+    # --- Staff Management ---
+    def delete_staff(self, staff_id):
+        """Deletes a staff member by ID (Robust)."""
+        try:
+            from bson.objectid import ObjectId
+            result = self.db.staff.delete_one({"_id": ObjectId(staff_id)})
+            return result.deleted_count > 0
+        except Exception as e:
+            print(f"[DB] Staff Delete Error: {e}")
+            return False
+
 # Singleton Accessor
 def get_db():
     return Database()

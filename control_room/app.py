@@ -12,6 +12,7 @@ import time
 from ultralytics import YOLO
 import hub as sentinel_hub  # Local import since in same dir (moved)
 from shared import auth as sentinel_auth # Shared Auth
+from shared import db # Shared DB for Staff Management
 
 
 # --- Configuration ---
@@ -145,6 +146,140 @@ def sentinel_dashboard():
             st.rerun()
         st.divider()
 
+    # --- Navigation ---
+    view_mode = st.sidebar.radio("Navigation", ["Live Monitor", "Manage Staff"])
+    
+    if view_mode == "Manage Staff":
+        st.title("👥 Staff Management")
+        st.write("Manage ground staff details and deployment.")
+        
+        c1, c2 = st.columns([1, 2])
+        
+        with c1:
+            st.subheader("Add New Staff")
+            with st.form("add_staff_form"):
+                name = st.text_input("Name")
+                age = st.number_input("Age", min_value=18, max_value=100)
+                phone = st.text_input("Phone Number (+91...)")
+                zone = st.selectbox("Assign Initial Zone", ["Zone A (North)", "Zone B (South)", "Zone C (East)", "Zone D (West)", "Gate 1", "Gate 2", "Reserve"])
+                
+                submitted = st.form_submit_button("Register Staff")
+                if submitted:
+                    if name and phone:
+                        # Auto-format phone number (Assume +91 if 10 digits)
+                        formatted_phone = phone.strip()
+                        if len(formatted_phone) == 10 and not formatted_phone.startswith("+"):
+                             formatted_phone = "+91" + formatted_phone
+                        
+                        database = db.get_db()
+                        if database.add_staff(name, age, formatted_phone, zone):
+                            st.success(f"Added {name}")
+                            st.rerun()
+                        else:
+                            st.error("Failed to add staff.")
+                    else:
+                        st.error("Name and Phone are required.")
+
+            st.divider()
+            st.subheader("🚀 Deploy Staff")
+            
+            # Deployment Form
+            database = db.get_db()
+            staff_list = database.get_all_staff()
+            staff_names = [s['name'] for s in staff_list] if staff_list else []
+            
+            if staff_names:
+                with st.form("deploy_form"):
+                    selected_staff = st.selectbox("Select Staff", staff_names)
+                    deploy_zone = st.selectbox("Deploy To", ["Zone A (North)", "Zone B (South)", "Zone C (East)", "Zone D (West)", "Gate 1", "Gate 2"])
+                    
+                    # Twilio Credentials (User Input for Privacy or Env Var)
+                    st.caption("Twilio Credentials for SMS")
+                    tw_sid = st.text_input("Account SID", type="password", key="tw_sid")
+                    tw_token = st.text_input("Auth Token", type="password", key="tw_token")
+                    tw_phone = st.text_input("Twilio Phone Number", key="tw_phone")
+                    
+                    deploy_btn = st.form_submit_button("Deploy & Notify")
+                    
+                    if deploy_btn:
+                        # 1. Update DB
+                        if database.update_staff_zone(selected_staff, deploy_zone):
+                            st.success(f"Redeployed {selected_staff} to {deploy_zone}")
+                            
+                            # 2. Send SMS
+                            if tw_sid and tw_token and tw_phone:
+                                try:
+                                    # Find staff phone number
+                                    staff_details = next((s for s in staff_list if s['name'] == selected_staff), None)
+                                    if staff_details:
+                                        from twilio.rest import Client
+                                        client = Client(tw_sid, tw_token)
+                                        
+                                        msg_body = f"🚨 SENTINEL ALERT: {selected_staff}, you are deployed to {deploy_zone} immediately. Please report to station."
+                                        
+                                        message = client.messages.create(
+                                            body=msg_body,
+                                            from_=tw_phone,
+                                            to=staff_details['phone']
+                                        )
+                                        st.success(f"SMS Sent! SID: {message.sid}")
+                                    else:
+                                        st.error("Staff phone number not found.")
+                                except Exception as e:
+                                    st.error(f"Twilio Error: {e}")
+                            else:
+                                st.warning("Twilio credentials missing. SMS not sent.")
+                            
+                            time.sleep(1) # Pause to show success
+                            st.rerun()
+                        else:
+                            st.error("Failed to update deployment in DB.")
+            else:
+                st.info("Register staff first to deploy them.")
+            
+            st.divider()
+            
+            # Removed separate delete section in favor of inline buttons
+
+
+        with c2:
+            st.subheader("Current Ground Staff")
+            database = db.get_db()
+            # Reload list to show updates
+            staff_list = database.get_all_staff()
+            
+            if staff_list:
+                # Header
+                h1, h2, h3, h4, h5 = st.columns([2, 1, 2, 2, 1])
+                h1.markdown("**Name**")
+                h2.markdown("**Age**")
+                h3.markdown("**Phone**")
+                h4.markdown("**Zone**")
+                h5.markdown("**Action**")
+                
+                for s in staff_list:
+                    with st.container():
+                        c1, c2, c3, c4, c5 = st.columns([2, 1, 2, 2, 1])
+                        c1.write(s['name'])
+                        c2.write(str(s['age']))
+                        c3.write(s['phone'])
+                        c4.write(s['zone'])
+                        
+                        # Unique key for each button is crucial
+                        if c5.button("🗑️", key=f"del_{s['_id']}"):
+                            # Pass ID instead of Name for robust deletion
+                            if database.delete_staff(s['_id']):
+                                st.success(f"Deleted {s['name']}")
+                                time.sleep(0.5)
+                                st.rerun()
+                            else:
+                                st.error("Delete failed")
+                        st.divider()
+            else:
+                st.info("No staff members added yet.")
+        return
+
+    # --- Live Monitor View (Existing Logic) ---
     # 1. Input Source
     st.sidebar.subheader("Input Source")
     input_type = st.sidebar.selectbox("Source Type", ["Live Webcam", "Phone Camera (IP Webcam)", "Upload File"])
@@ -370,7 +505,6 @@ def sentinel_dashboard():
                 st_metrics.markdown(f"**People:** {count} | **Audio:** {stat_aud}")
                 hub.broadcast_frame(annotated_frame)
                 frame_idx += 1
-
             cap.release()
 
 # --- Main/Entry Point ---

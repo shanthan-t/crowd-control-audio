@@ -9,3 +9,4 @@ bcrypt
 python-socketio
 eventlet
 pyserial
+twilio
